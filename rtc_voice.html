@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OpenAI Realtime Voice Chat</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        label { display: block; margin-top: 10px; }
+        select, input[type="text"] { width: 300px; padding: 5px; }
+        button { margin-top: 10px; padding: 10px 20px; }
+        #status { margin-top: 20px; }
+        #chat-log { margin-top: 20px; border: 1px solid #ccc; padding: 10px; height: 200px; overflow-y: scroll; }
+    </style>
+</head>
+<body>
+    <h1>OpenAI Realtime Voice Chat</h1>
+
+    <label for="apiKey">OpenAI API Key:</label>
+    <input type="text" id="apiKey" placeholder="Enter your OpenAI API Key" />
+
+    <label for="voiceSelect">Select Voice:</label>
+    <select id="voiceSelect">
+        <option value="cove">Cove</option>
+        <option value="santa">Santa</option>
+    </select>
+
+    <button id="startButton">Start</button>
+    <button id="stopButton" disabled>Stop</button>
+
+    <div id="status">Connection status: <span id="connectionStatus">Not connected</span></div>
+    <div id="chat-log"></div>
+
+    <script>
+        let pc = null;
+        let dc = null;
+        let isConnected = false;
+        let audioStream = null;
+
+        const apiKeyInput = document.getElementById('apiKey');
+        const voiceSelect = document.getElementById('voiceSelect');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const chatLog = document.getElementById('chat-log');
+
+        startButton.addEventListener('click', async () => {
+            const apiKey = apiKeyInput.value.trim();
+            const voice = voiceSelect.value;
+
+            if (!apiKey) {
+                alert('Please enter your OpenAI API key.');
+                return;
+            }
+
+            startButton.disabled = true;
+            stopButton.disabled = false;
+            connectionStatus.textContent = 'Connecting...';
+
+            try {
+                await startSession(apiKey, voice);
+                isConnected = true;
+                connectionStatus.textContent = 'Connected';
+            } catch (error) {
+                console.error('Error starting session:', error);
+                connectionStatus.textContent = 'Connection failed';
+                startButton.disabled = false;
+                stopButton.disabled = true;
+            }
+        });
+
+        stopButton.addEventListener('click', () => {
+            stopSession();
+            isConnected = false;
+            connectionStatus.textContent = 'Disconnected';
+            startButton.disabled = false;
+            stopButton.disabled = true;
+        });
+
+        async function startSession(apiKey, voice) {
+            pc = new RTCPeerConnection();
+
+            // Handle remote audio stream
+            pc.ontrack = event => {
+                const [remoteStream] = event.streams;
+                const audioElement = new Audio();
+                audioElement.srcObject = remoteStream;
+                audioElement.play();
+            };
+
+            // Access user microphone
+            audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioStream.getTracks().forEach(track => pc.addTrack(track, audioStream));
+
+            // Create data channel
+            dc = pc.createDataChannel('oai-events');
+
+            dc.onopen = () => {
+                logMessage('Data channel opened.');
+                sendInitialEvent();
+            };
+
+            dc.onmessage = event => {
+                const message = JSON.parse(event.data);
+                handleServerMessage(message);
+            };
+
+            // Create offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            // Send SDP offer to OpenAI Realtime API
+            const sdpResponse = await fetch(`https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/sdp',
+                },
+                body: offer.sdp,
+            });
+
+            if (!sdpResponse.ok) {
+                throw new Error(`Server responded with ${sdpResponse.status}: ${sdpResponse.statusText}`);
+            }
+
+            const answerSdp = await sdpResponse.text();
+            const answer = new RTCSessionDescription({
+                type: 'answer',
+                sdp: answerSdp,
+            });
+
+            await pc.setRemoteDescription(answer);
+        }
+
+        function stopSession() {
+            if (dc) {
+                dc.close();
+            }
+            if (pc) {
+                pc.close();
+            }
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+            }
+            pc = null;
+            dc = null;
+            audioStream = null;
+        }
+
+        function sendInitialEvent() {
+            const event = {
+                type: 'response.create',
+                response: {
+                    modalities: ['text', 'audio'],
+                    instructions: 'Hello! Let\'s start a conversation.',
+                },
+            };
+            dc.send(JSON.stringify(event));
+            logMessage('Sent initial event to start conversation.');
+        }
+
+        function handleServerMessage(message) {
+            logMessage(`Received message: ${JSON.stringify(message)}`);
+            // Handle the message according to the Realtime API event types
+            // For simplicity, we log the messages
+        }
+
+        function logMessage(message) {
+            const p = document.createElement('p');
+            p.textContent = message;
+            chatLog.appendChild(p);
+            chatLog.scrollTop = chatLog.scrollHeight;
+        }
+    </script>
+</body>
+</html>
